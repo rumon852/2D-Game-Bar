@@ -1,14 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Typing Attack</title>
     <style>
         body {
             margin: 0;
             background: #000;
             overflow: hidden; /* Prevent scrollbars */
+            font-family: Arial, sans-serif;
         }
         canvas {
             display: block;
@@ -28,6 +29,9 @@
         function resizeCanvas() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
+            // Keep pause button inside canvas on resize
+            pauseButton.x = canvas.width - 60;
+            pauseButton.y = 60;
         }
         window.addEventListener('resize', resizeCanvas);
         resizeCanvas();
@@ -66,27 +70,45 @@
         let totalCorrectChars = 0;
         let errorCount = 0;
 
-        for (let i = 0; i < 100; i++) {
-            stars.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, size: Math.random() * 2 + 1 });
+        // Stars
+        function generateStars(count = 100) {
+            stars = [];
+            for (let i = 0; i < count; i++) {
+                stars.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, size: Math.random() * 2 + 1 });
+            }
         }
+        generateStars(100);
 
         // Sounds
+        async function ensureAudio() {
+            // resume audio context if suspended (some browsers block autoplay)
+            if (audioCtx && audioCtx.state === 'suspended') {
+                try { await audioCtx.resume(); } catch (e) { /* ignore */ }
+            }
+        }
         function playSound(freq, duration, type = 'sine') {
             if (!soundsEnabled) return;
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.frequency.value = freq;
-            osc.type = type;
-            osc.start();
-            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
-            osc.stop(audioCtx.currentTime + duration);
+            try {
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.frequency.value = freq;
+                osc.type = type;
+                const now = audioCtx.currentTime;
+                gain.gain.setValueAtTime(0.0001, now);
+                gain.gain.exponentialRampToValueAtTime(0.5, now + 0.01);
+                osc.start(now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+                osc.stop(now + duration + 0.02);
+            } catch (err) {
+                // audio not available — ignore silently
+            }
         }
-        function playShoot() { playSound(800, 0.1, 'square'); }
-        function playExplosion() { playSound(100, 0.3, 'sawtooth'); }
-        function playWrong() { playSound(200, 0.1, 'triangle'); }
+        function playShoot() { playSound(800, 0.08, 'square'); }
+        function playExplosion() { playSound(100, 0.25, 'sawtooth'); }
+        function playWrong() { playSound(200, 0.12, 'triangle'); }
 
         function getRandomWord(minLen, maxLen) {
             const filtered = getWordsByLength(minLen, maxLen);
@@ -150,22 +172,27 @@
                 // Draw text overlay with contrast
                 ctx.font = '16px Arial';
                 ctx.textAlign = 'center';
-                const textY = this.y - this.size - 5;
+                const textY = this.y - this.size - 8;
                 const textWidth = ctx.measureText(this.word).width;
+                const rectX = this.x - textWidth / 2 - 5;
+                const rectY = textY - 14;
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-                ctx.fillRect(this.x - textWidth / 2 - 5, textY - 15, textWidth + 10, 20);
+                ctx.fillRect(rectX, rectY, textWidth + 10, 20);
 
-                if (this === targetedEnemy) {
+                if (this === targetedEnemy && typed.length > 0) {
                     // Dim full word
                     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
                     ctx.fillText(this.word, this.x, textY);
 
                     // Bright typed prefix overlay
                     const prefix = typed;
+                    // To position prefix accurately, measure prefix width and offset relative to full word center
                     const prefixWidth = ctx.measureText(prefix).width;
-                    const fullWidth = textWidth;
-                    const startX = this.x - fullWidth / 2;
+                    // Calculate starting X for full word
+                    const startX = this.x - textWidth / 2;
+                    // Draw prefix in green
                     ctx.fillStyle = '#00ff00';
+                    // Draw the prefix centered at startX + prefixWidth/2
                     ctx.fillText(prefix, startX + prefixWidth / 2, textY);
                 } else {
                     // Normal word
@@ -226,62 +253,99 @@
             const config = DIFFICULTIES[difficulty];
             const x = Math.random() * (canvas.width - 100) + 50;
             const word = getRandomWord(...config.wordLength);
-            enemies.push(new Enemy(x, 0, word, config.speed));
+            enemies.push(new Enemy(x, -30, word, config.speed));
         }
 
         // Typing
-        window.addEventListener('keydown', (e) => {
-            if (state === STATES.PAUSED && e.key === 'Escape') { state = STATES.PLAYING; return; }
+        window.addEventListener('keydown', async (e) => {
+            // Allow audio resume on any user interaction
+            await ensureAudio();
+
+            if (e.key === 'Escape') {
+                // Toggle pause <-> playing
+                if (state === STATES.PLAYING) { state = STATES.PAUSED; }
+                else if (state === STATES.PAUSED) { state = STATES.PLAYING; }
+                // If we're in menu or gameover, ignore escape
+                return;
+            }
+
             if (state !== STATES.PLAYING) return;
-            if (e.key === 'Escape') { state = STATES.PAUSED; return; }
+
             const key = e.key.toLowerCase();
+
             if (key.length === 1 && key.match(/[a-z]/)) {
                 if (!startTime) startTime = Date.now();
-                typed += key; 
-                
+                typed += key;
+
                 // Create laser effect for each keystroke when targeting an enemy
                 if (targetedEnemy) {
                     playShoot();
                     lasers.push(new Laser(player.x, player.y - 30, targetedEnemy.x, targetedEnemy.y));
                 }
-                
+
                 checkMatch();
             } else if (e.key === 'Backspace') {
-                typed = typed.slice(0, -1); checkMatch();
+                typed = typed.slice(0, -1);
+                // If typed becomes empty, clear targeting
+                if (typed === '') targetedEnemy = null;
+                else checkMatch();
             }
         });
 
         function checkMatch() {
-            if (targetedEnemy) {
-                if (!targetedEnemy.word.startsWith(typed)) {
-                    errorCount++; typed = ''; targetedEnemy = null; playWrong(); checkMatch();
-                } else if (typed === targetedEnemy.word) {
-                    // Automatically destroy enemy when word is fully typed
-                    handleEnemyDestroyed(targetedEnemy);
-                }
+            // If typed is empty, nothing to match
+            if (!typed) {
+                targetedEnemy = null;
                 return;
             }
+
+            // If we have a currently targeted enemy, check it first
+            if (targetedEnemy) {
+                if (!targetedEnemy.word.startsWith(typed)) {
+                    // Wrong input for this target
+                    errorCount++;
+                    typed = '';
+                    targetedEnemy = null;
+                    playWrong();
+                    return;
+                } else if (typed === targetedEnemy.word) {
+                    // Correct full word
+                    handleEnemyDestroyed(targetedEnemy);
+                    return;
+                } else {
+                    // Partial match — keep targeting
+                    return;
+                }
+            }
+
+            // No targeted enemy — try to find one matching typed prefix
             const targets = enemies.filter(e => e.word.startsWith(typed));
             if (targets.length > 0) {
+                // Choose the lowest enemy (closest to player) to prioritize immediate threats
                 targets.sort((a, b) => b.y - a.y);
                 targetedEnemy = targets[0];
-            } else { playWrong(); errorCount++; typed = ''; }
+            } else {
+                // No match at all
+                errorCount++;
+                typed = '';
+                targetedEnemy = null;
+                playWrong();
+            }
         }
 
         function handleEnemyDestroyed(enemy) {
-            // No need to create a laser here since we're already creating lasers on each keystroke
-            setTimeout(() => {
-                if (soundsEnabled) playExplosion();
-                for (let i = 0; i < 10; i++) particles.push(new Particle(enemy.x, enemy.y));
-            }, 100);
+            // Create explosion + particles + sound
+            if (soundsEnabled) playExplosion();
+            for (let i = 0; i < 10; i++) particles.push(new Particle(enemy.x, enemy.y));
             enemies = enemies.filter(e => e !== enemy);
-            totalCorrectChars += typed.length;
-            wordsDestroyed++; 
+            totalCorrectChars += enemy.word.length;
+            wordsDestroyed++;
             // Award more points based on word length and difficulty
             const wordBonus = enemy.word.length * 5;
             const difficultyMultiplier = difficulty === 'EASY' ? 1 : (difficulty === 'NORMAL' ? 2 : 3);
             score += (10 + wordBonus) * difficultyMultiplier;
-            typed = ''; targetedEnemy = null;
+            typed = '';
+            targetedEnemy = null;
         }
 
         // Pause button object
@@ -295,12 +359,12 @@
                 ctx.beginPath();
                 ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
                 ctx.fill();
-                
+
                 // Draw pause icon
                 ctx.fillStyle = '#000';
                 ctx.fillRect(this.x - 7, this.y - 10, 5, 20);
                 ctx.fillRect(this.x + 2, this.y - 10, 5, 20);
-                
+
                 // Add outline
                 ctx.strokeStyle = '#fff';
                 ctx.lineWidth = 2;
@@ -316,21 +380,28 @@
 
         function drawHUD() {
             // Draw score with highlight
-            ctx.fillStyle = '#00ffff'; ctx.font = 'bold 24px Arial';
-            ctx.textAlign = 'left'; 
-            ctx.shadowColor = '#00ffff'; ctx.shadowBlur = 10;
-            ctx.fillText(Score: ${score}, 20, 30);
+            ctx.fillStyle = '#00ffff';
+            ctx.font = 'bold 24px Arial';
+            ctx.textAlign = 'left';
+            ctx.shadowColor = '#00ffff';
+            ctx.shadowBlur = 10;
+            ctx.fillText('Score: ' + score, 20, 30);
             ctx.shadowBlur = 0;
-            
+
             // Draw health
-            ctx.fillStyle = '#fff'; ctx.font = '20px Arial';
-            ctx.textAlign = 'right'; ctx.fillText(Health: ${player.health}, canvas.width - 20, 30);
-            
+            ctx.fillStyle = '#fff';
+            ctx.font = '20px Arial';
+            ctx.textAlign = 'right';
+            ctx.fillText('Health: ' + player.health, canvas.width - 20, 30);
+
             // Draw typed text
-            ctx.textAlign = 'center'; ctx.fillText(Typed: ${typed}, canvas.width / 2, canvas.height - 20);
-            
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#fff';
+            ctx.fillText('Typed: ' + (typed || '_'), canvas.width / 2, canvas.height - 20);
+
             // Draw pause button
             pauseButton.x = canvas.width - 60; // Update position in case of window resize
+            pauseButton.y = 60;
             pauseButton.draw();
         }
 
@@ -357,39 +428,54 @@
 
         function drawMenu() {
             drawStars();
-            ctx.fillStyle = '#00ffff'; ctx.shadowColor = '#00ffff'; ctx.shadowBlur = 20;
-            ctx.font = '60px Arial'; ctx.textAlign = 'center';
+            ctx.fillStyle = '#00ffff';
+            ctx.shadowColor = '#00ffff';
+            ctx.shadowBlur = 20;
+            ctx.font = '60px Arial';
+            ctx.textAlign = 'center';
             ctx.fillText('TYPING ATTACK', canvas.width / 2, canvas.height / 2 - 150);
             ctx.shadowBlur = 0;
 
-            ctx.fillStyle = '#fff'; ctx.font = '30px Arial';
+            ctx.fillStyle = '#fff';
+            ctx.font = '30px Arial';
             ctx.fillText('Type to Survive!', canvas.width / 2, canvas.height / 2 - 90);
 
             menuButtons = [];
-            const hoveredEasy = mousePos && mousePos.y > canvas.height/2 - 40 && mousePos.y < canvas.height/2;
-            const hoveredNormal = mousePos && mousePos.y > canvas.height/2 + 20 && mousePos.y < canvas.height/2 + 60;
-            const hoveredExpert = mousePos && mousePos.y > canvas.height/2 + 80 && mousePos.y < canvas.height/2 + 120;
-            const hoveredClose = mousePos && mousePos.y > canvas.height/2 + 140 && mousePos.y < canvas.height/2 + 180;
-            menuButtons.push(drawButton("Play Easy Mode", canvas.width / 2, canvas.height / 2 - 20, "EASY", hoveredEasy));
-            menuButtons.push(drawButton("Play Normal Mode", canvas.width / 2, canvas.height / 2 + 40, "NORMAL", hoveredNormal));
-            menuButtons.push(drawButton("Play Expert Mode", canvas.width / 2, canvas.height / 2 + 100, "EXPERT", hoveredExpert));
-            menuButtons.push(drawButton("Close Game", canvas.width / 2, canvas.height / 2 + 160, "CLOSE", hoveredClose));
+            // We'll compute hovered state from mousePos and button rect after drawing
+            const easyRect = drawButton("Play Easy Mode", canvas.width / 2, canvas.height / 2 - 20, "EASY", false);
+            const normalRect = drawButton("Play Normal Mode", canvas.width / 2, canvas.height / 2 + 40, "NORMAL", false);
+            const expertRect = drawButton("Play Expert Mode", canvas.width / 2, canvas.height / 2 + 100, "EXPERT", false);
+            const closeRect = drawButton("Close Game", canvas.width / 2, canvas.height / 2 + 160, "CLOSE", false);
+
+            // Re-draw with hover styling if mouse is over
+            menuButtons = [easyRect, normalRect, expertRect, closeRect];
+            if (mousePos) {
+                for (let i = 0; i < menuButtons.length; i++) {
+                    const b = menuButtons[i];
+                    const hovered = mousePos.x > b.x && mousePos.x < b.x + b.width && mousePos.y > b.y && mousePos.y < b.y + b.height;
+                    if (hovered) {
+                        // redraw hovered
+                        drawButton(i === 0 ? "Play Easy Mode" : i === 1 ? "Play Normal Mode" : i === 2 ? "Play Expert Mode" : "Close Game",
+                                   canvas.width / 2, canvas.height / 2 - 20 + i * 60, b.mode, true);
+                    }
+                }
+            }
 
             ctx.font = '16px Arial'; ctx.fillStyle = '#fff';
-            ctx.fillText("Created by 2D Game Bar", canvas.width / 2, canvas.height - 30);
+            ctx.fillText("Created by Host Rumon", canvas.width / 2, canvas.height - 30);
         }
 
         function handleClick(e) {
             const r = canvas.getBoundingClientRect();
-            const x = (e.clientX || e.touches[0].clientX) - r.left;
-            const y = (e.clientY || e.touches[0].clientY) - r.top;
-            
+            const x = (e.clientX || (e.touches && e.touches[0].clientX)) - r.left;
+            const y = (e.clientY || (e.touches && e.touches[0].clientY)) - r.top;
+
             // Check if pause button was clicked during gameplay
             if (state === STATES.PLAYING && pauseButton.isClicked(x, y)) {
                 state = STATES.PAUSED;
                 return;
             }
-            
+
             if (state === STATES.MENU) {
                 for (let btn of menuButtons) {
                     if (x > btn.x && x < btn.x + btn.width && y > btn.y && y < btn.y + btn.height) {
@@ -397,7 +483,7 @@
                             running = false;
                             canvas.style.display = 'none';
                         } else {
-                            difficulty = btn.mode; 
+                            difficulty = btn.mode;
                             startGame();
                         }
                     }
@@ -436,28 +522,37 @@
             enemies = []; particles = []; lasers = [];
             typed = ''; targetedEnemy = null; lastSpawn = 0;
             startTime = null; wordsDestroyed = 0; totalCorrectChars = 0; errorCount = 0;
+            // regenerate stars to fit canvas
+            generateStars(100);
         }
 
         function drawPaused() {
             ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0,0,canvas.width,canvas.height);
-            
+
             // Pause title with glow effect
-            ctx.fillStyle = '#00ffff'; 
-            ctx.shadowColor = '#00ffff'; 
+            ctx.fillStyle = '#00ffff';
+            ctx.shadowColor = '#00ffff';
             ctx.shadowBlur = 15;
-            ctx.font = '50px Arial'; 
+            ctx.font = '50px Arial';
             ctx.textAlign = 'center';
             ctx.fillText('PAUSED', canvas.width/2, canvas.height/2 - 80);
             ctx.shadowBlur = 0;
-            
+
             // Draw pause menu buttons
             pauseButtons = [];
-            const hoveredResume = mousePos && mousePos.y > canvas.height/2 - 20 && mousePos.y < canvas.height/2 + 20;
-            const hoveredMenu = mousePos && mousePos.y > canvas.height/2 + 40 && mousePos.y < canvas.height/2 + 80;
-            const hoveredClose = mousePos && mousePos.y > canvas.height/2 + 100 && mousePos.y < canvas.height/2 + 140;
-            pauseButtons.push(drawButton("Resume Game", canvas.width/2, canvas.height/2, "RESUME", hoveredResume));
-            pauseButtons.push(drawButton("Return to Menu", canvas.width/2, canvas.height/2 + 60, "MENU", hoveredMenu));
-            pauseButtons.push(drawButton("Close Game", canvas.width/2, canvas.height/2 + 120, "CLOSE", hoveredClose));
+            const resumeRect = drawButton("Resume Game", canvas.width/2, canvas.height/2, "RESUME", false);
+            const menuRect = drawButton("Return to Menu", canvas.width/2, canvas.height/2 + 60, "MENU", false);
+            const closeRect = drawButton("Close Game", canvas.width/2, canvas.height/2 + 120, "CLOSE", false);
+            pauseButtons = [resumeRect, menuRect, closeRect];
+
+            // highlight hover
+            if (mousePos) {
+                for (let i = 0; i < pauseButtons.length; i++) {
+                    const b = pauseButtons[i];
+                    const hovered = mousePos.x > b.x && mousePos.x < b.x + b.width && mousePos.y > b.y && mousePos.y < b.y + b.height;
+                    if (hovered) drawButton(i === 0 ? "Resume Game" : i === 1 ? "Return to Menu" : "Close Game", canvas.width/2, canvas.height/2 + i*60, b.mode, true);
+                }
+            }
         }
 
         function drawGameOver() {
@@ -465,7 +560,7 @@
             ctx.fillStyle = '#fff'; ctx.font = '50px Arial'; ctx.textAlign = 'center';
             ctx.fillText('Game Over', canvas.width/2, canvas.height/2-100);
             ctx.font = '30px Arial';
-            ctx.fillText(Final Score: ${score}, canvas.width/2, canvas.height/2-30);
+            ctx.fillText('Final Score: ' + score, canvas.width/2, canvas.height/2-30);
             let acc = 0, wpm = 0;
             if (startTime) {
                 const total = totalCorrectChars + errorCount;
@@ -473,14 +568,21 @@
                 const minutes = (Date.now()-startTime)/60000;
                 wpm = minutes > 0 ? Math.round(wordsDestroyed/minutes) : 0;
             }
-            ctx.fillText(Accuracy: ${acc}%, canvas.width/2, canvas.height/2+10);
-            ctx.fillText(Words Per Minute: ${wpm}, canvas.width/2, canvas.height/2+50);
+            ctx.fillText('Accuracy: ' + acc + '%', canvas.width/2, canvas.height/2+10);
+            ctx.fillText('Words Per Minute: ' + wpm, canvas.width/2, canvas.height/2+50);
 
             gameoverButtons = [];
-            const hoveredMenu = mousePos && mousePos.y > canvas.height/2 + 100 && mousePos.y < canvas.height/2 + 140;
-            const hoveredClose = mousePos && mousePos.y > canvas.height/2 + 160 && mousePos.y < canvas.height/2 + 200;
-            gameoverButtons.push(drawButton("Return to Menu", canvas.width/2, canvas.height/2+120, "MENU", hoveredMenu));
-            gameoverButtons.push(drawButton("Close Game", canvas.width/2, canvas.height/2+180, "CLOSE", hoveredClose));
+            const menuRect = drawButton("Return to Menu", canvas.width/2, canvas.height/2+120, "MENU", false);
+            const closeRect = drawButton("Close Game", canvas.width/2, canvas.height/2+180, "CLOSE", false);
+            gameoverButtons = [menuRect, closeRect];
+
+            if (mousePos) {
+                for (let i = 0; i < gameoverButtons.length; i++) {
+                    const b = gameoverButtons[i];
+                    const hovered = mousePos.x > b.x && mousePos.x < b.x + b.width && mousePos.y > b.y && mousePos.y < b.y + b.height;
+                    if (hovered) drawButton(i === 0 ? "Return to Menu" : "Close Game", canvas.width/2, canvas.height/2+120 + i*60, b.mode, true);
+                }
+            }
         }
 
         function gameLoop(ts) {
@@ -492,17 +594,37 @@
             drawStars();
             if (state === STATES.PLAYING) {
                 const cfg = DIFFICULTIES[difficulty];
-                if (ts-lastSpawn > cfg.spawnRate) { spawnEnemy(); lastSpawn = ts; }
+                if (!lastSpawn) lastSpawn = ts;
+                if (ts - lastSpawn > cfg.spawnRate) { spawnEnemy(); lastSpawn = ts; }
+                // Update & draw enemies
                 enemies.forEach(e => { e.update(); e.draw(); });
-                particles = particles.filter(p=>p.life>0); particles.forEach(p=>{p.update();p.draw();});
-                lasers = lasers.filter(l=>l.life>0); lasers.forEach(l=>{l.update();l.draw();});
-                drawPlayer(); drawHUD();
+                // Update & draw particles
+                particles = particles.filter(p => p.life > 0);
+                particles.forEach(p => { p.update(); p.draw(); });
+                // Update & draw lasers
+                lasers = lasers.filter(l => l.life > 0);
+                lasers.forEach(l => { l.update(); l.draw(); });
+                drawPlayer();
+                drawHUD();
             } else if (state === STATES.MENU) drawMenu();
             else if (state === STATES.PAUSED) { enemies.forEach(e=>e.draw()); drawPlayer(); drawHUD(); drawPaused(); }
             else if (state === STATES.GAMEOVER) drawGameOver();
             requestAnimationFrame(gameLoop);
         }
         requestAnimationFrame(gameLoop);
+
+        // Touch support for menu clicks (mobile)
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            handleClick(e);
+        }, { passive: false });
+
+        // If the player loses all health, show game over
+        // Check health in loop as well (in case of external change)
+        setInterval(() => {
+            if (player.health <= 0 && state !== STATES.GAMEOVER) state = STATES.GAMEOVER;
+        }, 200);
+
     </script>
 </body>
 </html>
